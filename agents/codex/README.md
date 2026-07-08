@@ -2,6 +2,88 @@
 
 在本地 llama.cpp 服务（Qwen GGUF）上运行 Codex CLI。
 
+## 安装 / 卸载 Codex CLI
+
+Codex CLI 本身是独立 CLI（与 llama.cpp 无关），下面两种方式任选其一。
+
+> 安全提示：官方脚本会从远端下载并执行安装程序。如需自行审阅，可先把脚本
+> 下载到本地查看后再运行。
+
+### 方式 A：官方脚本
+
+安装：
+
+```bash
+# macOS / Linux
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```
+
+```powershell
+# Windows PowerShell
+irm https://chatgpt.com/codex/install.ps1 | iex
+# or
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+卸载：
+
+删除脚本安装的 codex 二进制（用 `which codex` / `Get-Command codex` 定位），
+需要时再删除配置目录 `~/.codex`（Windows：`%USERPROFILE%\.codex`）。
+
+```bash
+# macOS / Linux
+rm -f "$(which codex)"
+```
+
+```powershell
+# Windows PowerShell
+Remove-Item (Get-Command codex).Source -Force
+```
+
+### 方式 B：pnpm 全局安装（建议 Node.js LTS ≥ 20）
+
+1. 安装 pnpm（独立版，才能用 pnpm 管理 Node）：
+
+   ```powershell
+   # Windows：scoop
+   scoop install pnpm
+   ```
+
+   ```bash
+   # macOS：Homebrew
+   brew install pnpm
+
+   # Linux / WSL：官方独立脚本
+   curl -fsSL https://get.pnpm.io/install.sh | sh -
+   ```
+
+2. 用 pnpm 安装 Node.js（LTS，≥ 20）：
+
+   ```bash
+   pnpm env use --global lts
+   ```
+
+3. 安装 Codex CLI：
+
+   ```bash
+   pnpm add -g @openai/codex
+   ```
+
+4. 卸载 Codex CLI：
+
+   ```bash
+   pnpm remove -g @openai/codex
+   pnpm store prune
+
+   # remove config dir if needed
+   # Linux/macOS/WSL
+   rm -rf ~/.codex
+   # Windows PowerShell
+   Remove-Item "$env:USERPROFILE\.codex" -Recurse -Force
+   ```
+
+> 验证：`codex --version`。
+
 ## 安装步骤
 
 1. 启动 llama-server 并加载 chat 模板（端口 9999）：
