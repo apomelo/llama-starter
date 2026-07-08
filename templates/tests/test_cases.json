@@ -1,0 +1,229 @@
+{
+  "description": "Test cases for the Agent Optimized Chat Template (chat_template.jinja). Each case is POSTed to llama-server /apply-template and the returned prompt is checked against 'expect' (all substrings must be present) and 'notExpect' (none may be present).",
+  "cases": [
+    {
+      "name": "Chat Completions - basic",
+      "add_generation_prompt": true,
+      "messages": [
+        { "role": "system", "content": "You are a helpful assistant." },
+        { "role": "user", "content": "Hello!" }
+      ],
+      "expect": [
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>",
+        "<|im_start|>user\nHello!<|im_end|>",
+        "<|im_start|>assistant\n"
+      ]
+    },
+    {
+      "name": "Multiple system + developer merge",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "system", "content": "Rule A." },
+        { "role": "developer", "content": "Rule B." },
+        { "role": "user", "content": "Hi" },
+        { "role": "system", "content": "Rule C." }
+      ],
+      "expect": [
+        "Rule A.\n\nRule B.\n\nRule C.",
+        "<|im_start|>user\nHi<|im_end|>"
+      ],
+      "notExpect": [
+        "<|im_start|>developer"
+      ]
+    },
+    {
+      "name": "Thinking - reasoning_content preserved",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "user", "content": "2+2?" },
+        { "role": "assistant", "reasoning_content": "Add two and two.", "content": "4" }
+      ],
+      "expect": [
+        "<think>\nAdd two and two.\n</think>",
+        "</think>\n\n4"
+      ]
+    },
+    {
+      "name": "Thinking - <thinking> tags normalized to <think>",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "user", "content": "hi" },
+        { "role": "assistant", "content": "<thinking>reason here</thinking>answer" },
+        { "role": "user", "content": "next" }
+      ],
+      "expect": [
+        "<think>reason here</think>answer"
+      ],
+      "notExpect": [
+        "<thinking>"
+      ]
+    },
+    {
+      "name": "Tool Calling - OpenAI function shape",
+      "add_generation_prompt": true,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] }
+          }
+        }
+      ],
+      "messages": [
+        { "role": "user", "content": "Weather in Paris?" },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            { "id": "call_1", "type": "function", "function": { "name": "get_weather", "arguments": { "city": "Paris" } } }
+          ]
+        },
+        { "role": "tool", "tool_call_id": "call_1", "content": "Sunny" }
+      ],
+      "expect": [
+        "# Tools",
+        "<tools>",
+        "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>"
+      ]
+    },
+    {
+      "name": "Parallel Tool Calls",
+      "add_generation_prompt": true,
+      "tools": [
+        { "type": "function", "function": { "name": "f", "parameters": { "type": "object", "properties": {} } } }
+      ],
+      "messages": [
+        { "role": "user", "content": "do both" },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            { "id": "c1", "type": "function", "function": { "name": "f", "arguments": { "n": 1 } } },
+            { "id": "c2", "type": "function", "function": { "name": "f", "arguments": { "n": 2 } } }
+          ]
+        },
+        { "role": "tool", "tool_call_id": "c1", "content": "R1" },
+        { "role": "tool", "tool_call_id": "c2", "content": "R2" }
+      ],
+      "expect": [
+        "\"arguments\": {\"n\": 1}}\n</tool_call>",
+        "\"arguments\": {\"n\": 2}}\n</tool_call>"
+      ]
+    },
+    {
+      "name": "Tool Result grouping (tool role)",
+      "add_generation_prompt": true,
+      "tools": [
+        { "type": "function", "function": { "name": "get_weather", "parameters": { "type": "object", "properties": {} } } }
+      ],
+      "messages": [
+        { "role": "user", "content": "weather?" },
+        { "role": "assistant", "content": "", "tool_calls": [ { "id": "c1", "type": "function", "function": { "name": "get_weather", "arguments": {} } } ] },
+        { "role": "tool", "tool_call_id": "c1", "content": "Sunny, 25C" }
+      ],
+      "expect": [
+        "<tool_response>\nSunny, 25C\n</tool_response>",
+        "<|im_start|>assistant\n"
+      ]
+    },
+    {
+      "name": "Parallel Tool Results grouped in one user turn",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "user", "content": "go" },
+        { "role": "assistant", "content": "", "tool_calls": [ { "id": "a", "type": "function", "function": { "name": "f", "arguments": {} } }, { "id": "b", "type": "function", "function": { "name": "f", "arguments": {} } } ] },
+        { "role": "tool", "tool_call_id": "a", "content": "R1" },
+        { "role": "tool", "tool_call_id": "b", "content": "R2" }
+      ],
+      "expect": [
+        "<tool_response>\nR1\n</tool_response>\n<tool_response>\nR2\n</tool_response>"
+      ]
+    },
+    {
+      "name": "Content array joined by server (multi text parts)",
+      "add_generation_prompt": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            { "type": "text", "text": "Part1" },
+            { "type": "text", "text": "Part2" }
+          ]
+        }
+      ],
+      "expect": [
+        "Part1",
+        "Part2"
+      ]
+    },
+    {
+      "name": "Unknown role downgraded to user",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "guru", "content": "mystery" }
+      ],
+      "expect": [
+        "<|im_start|>user\nmystery<|im_end|>"
+      ],
+      "notExpect": [
+        "<|im_start|>guru"
+      ]
+    },
+    {
+      "name": "Empty message dropped",
+      "add_generation_prompt": false,
+      "messages": [
+        { "role": "user", "content": "   " },
+        { "role": "user", "content": "real" }
+      ],
+      "expect": [
+        "<|im_start|>user\nreal<|im_end|>"
+      ]
+    },
+    {
+      "name": "JSON Schema / response_format present (does not break template)",
+      "add_generation_prompt": true,
+      "response_format": { "type": "json_schema", "json_schema": { "name": "out", "schema": { "type": "object" } } },
+      "messages": [
+        { "role": "system", "content": "Return JSON." },
+        { "role": "user", "content": "give me json" }
+      ],
+      "expect": [
+        "<|im_start|>system\nReturn JSON.<|im_end|>",
+        "<|im_start|>assistant\n"
+      ]
+    },
+    {
+      "name": "enable_thinking=false injects empty think",
+      "add_generation_prompt": true,
+      "chat_template_kwargs": { "enable_thinking": false },
+      "messages": [
+        { "role": "user", "content": "hi" }
+      ],
+      "expect": [
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+      ]
+    },
+    {
+      "name": "Claude Code / Codex style (system + tools + multi-turn)",
+      "add_generation_prompt": true,
+      "tools": [
+        { "type": "function", "function": { "name": "read_file", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } } }
+      ],
+      "messages": [
+        { "role": "system", "content": "You are a coding agent." },
+        { "role": "user", "content": "open main.go" },
+        { "role": "assistant", "content": "", "tool_calls": [ { "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": { "path": "main.go" } } } ] },
+        { "role": "tool", "tool_call_id": "c1", "content": "package main" }
+      ],
+      "expect": [
+        "You are a coding agent.",
+        "<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"main.go\"}}\n</tool_call>",
+        "<tool_response>\npackage main\n</tool_response>",
+        "<|im_start|>assistant\n"
+      ]
+    }
+  ]
+}

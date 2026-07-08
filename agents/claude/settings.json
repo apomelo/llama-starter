@@ -1,0 +1,17 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:9998",
+    "ANTHROPIC_API_KEY": "local",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-35B-A3B-IQ4_NL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.6-35B-A3B-IQ3_M",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.6-35B-A3B-IQ2_M"
+  },
+  "model": "opus",
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/statusline.sh",
+    "refreshInterval": 60
+  },
+  "autoUpdatesChannel": "stable",
+  "theme": "auto"
+}

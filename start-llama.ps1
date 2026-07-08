@@ -250,7 +250,32 @@ else {
 $ctxSize = $ctxK * 1024
 
 # ============================================================================
-#  8. Build alias + argument list
+#  8. Chat template selection (optional; blank = model's built-in template)
+# ============================================================================
+$chatTemplate = $null
+$templateDir = Join-Path $root "templates"
+$templates = @(Get-ChildItem "$templateDir\*.jinja" -ErrorAction SilentlyContinue)
+if ($templates.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  Chat templates (blank = model default):" -ForegroundColor Green
+    for ($i = 0; $i -lt $templates.Count; $i++) {
+        Write-Host ("  {0}. " -f ($i + 1)) -ForegroundColor Yellow -NoNewline
+        Write-Host $templates[$i].Name -ForegroundColor White
+    }
+    while ($true) {
+        $rawTpl = Read-Host "  Select chat template (blank = none)"
+        if ([string]::IsNullOrWhiteSpace($rawTpl)) { break }
+        $tplN = 0
+        if ([int]::TryParse($rawTpl.Trim(), [ref]$tplN) -and $tplN -ge 1 -and $tplN -le $templates.Count) {
+            $chatTemplate = $templates[$tplN - 1]
+            break
+        }
+        Write-Host "  Enter 1-$($templates.Count) or leave blank." -ForegroundColor Yellow
+    }
+}
+
+# ============================================================================
+#  9. Build alias + argument list
 # ============================================================================
 $aliasFamily = $model.Family
 if ($Config.ShortAlias) { $aliasFamily = Get-ShortFamily $model.Family }
@@ -269,6 +294,7 @@ $serverArgs = @(
 )
 if ($Config.UseJinja) { $serverArgs += "--jinja" }
 if ($mmproj)          { $serverArgs += @("--mmproj", $mmproj.FullName) }
+if ($chatTemplate)    { $serverArgs += @("--chat-template-file", $chatTemplate.FullName) }
 
 if ($supportsFlashAttn) {
     if ($flashAttnTakesValue) { $serverArgs += @("--flash-attn", "on") }
@@ -297,7 +323,7 @@ foreach ($k in $mode.Params.Keys) {
 }
 
 # ============================================================================
-#  9. Configuration summary
+#  10. Configuration summary
 # ============================================================================
 Write-Title "Launch Configuration"
 Write-KV "Model"       $model.Base
@@ -307,6 +333,7 @@ Write-KV "Size"        "$($model.SizeGB) GB"
 Write-KV "Mode"        $mode.Label
 Write-KV "Alias"       $alias
 Write-KV "mmproj"      $(if ($mmproj) { $mmproj.Name } else { "(none)" })
+Write-KV "Chat tmpl"   $(if ($chatTemplate) { $chatTemplate.Name } else { "(model default)" })
 Write-KV "Endpoint"    "http://$($Config.BindHost):$($Config.Port)"
 Write-KV "Context"     "$ctxSize  (${ctxK}k)"
 Write-KV "GPU layers"  $Config.NGpuLayers

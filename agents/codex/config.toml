@@ -1,0 +1,60 @@
+# ============================================================
+#  Codex CLI config for local llama.cpp
+#  Copy to ~/.codex/config.toml (Windows: %USERPROFILE%\.codex\config.toml)
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. Default model + metadata
+# ------------------------------------------------------------
+model = "Qwen3.6-35B-A3B-IQ3_M"          # must match your loaded GGUF alias
+model_provider = "local"                 # -> [model_providers.local] below
+
+# Model metadata — silences the "Model metadata not found" warning.
+# Only `model_context_window` is a real Codex key; keep it aligned with -c.
+# NOTE: `model_max_output_tokens` and `[[models]]` are NOT valid Codex keys
+#       (Codex silently ignores them). To populate the /model picker with
+#       custom models, use `model_catalog_json` (see README).
+model_context_window = 131072
+model_reasoning_effort = "medium"
+
+# Make your local models appear in the /model picker.
+# Put models.json in the SAME folder as this config (your Codex home:
+# ~/.codex on Linux/WSL, %USERPROFILE%\.codex on Windows).
+# The relative path resolves against the Codex home.
+# WARNING: this REPLACES Codex's entire bundled catalog (only listed models show).
+model_catalog_json = "./models.json"
+
+# ------------------------------------------------------------
+# 2. Local provider
+#    Codex tools are few and simple, so connect directly to llama-server.
+#    Only switch to the schema proxy (http://localhost:9998/v1) if you attach
+#    MCP servers with heavy tool schemas and hit "failed to parse grammar".
+# ------------------------------------------------------------
+[model_providers.local]
+name = "Local Llama.cpp"
+base_url = "http://localhost:9999/v1"
+wire_api = "responses"                   # this llama.cpp build supports /v1/responses
+
+# ------------------------------------------------------------
+# 3. Project trust (edit path as needed)
+# ------------------------------------------------------------
+[projects."/home/ubuntu/project"]
+trust_level = "trusted"
+
+# ------------------------------------------------------------
+# 4. Status line (built-in; mirrors claude's statusline.sh)
+#    Shows: model+reasoning / context used / dir / project / git branch /
+#           tokens used / 5h + weekly rate limits. Colors via status_line_use_colors.
+#    Verified IDs: model | model-with-reasoning | reasoning | context-remaining |
+#      context-used | current-dir | project-name | git-branch | used-tokens |
+#      total-input-tokens | total-output-tokens | five-hour-limit | weekly-limit |
+#      codex-version | context-window-size | session-id | activity
+#    Unknown IDs are silently dropped ("Ignored invalid status line items" warning).
+#    NOTE: `project-name` = the git repo root (or project .codex) folder name; it is
+#      OMITTED WHEN UNAVAILABLE (cwd not inside a git repo and no project config).
+#      `git-branch` is likewise omitted outside a git repo. `current-dir` always shows.
+#    Set status_line = [] to hide the status line.
+# ------------------------------------------------------------
+[tui]
+status_line = ["model-with-reasoning", "context-used", "project-name", "git-branch", "used-tokens", "five-hour-limit", "weekly-limit"]
+status_line_use_colors = true

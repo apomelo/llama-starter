@@ -1,0 +1,189 @@
+{#- =====================================================================
+    Agent Optimized Chat Template  (Qwen3.6 base)
+    ---------------------------------------------------------------------
+    Enhances the official Qwen3.6 ChatML template for maximum compatibility
+    with llama.cpp (minja) and mainstream AI agents / OpenAI-compatible APIs.
+
+    Design goals:
+      - Keep the model's original ChatML behaviour intact.
+      - Auto-repair malformed input instead of raising exceptions.
+      - Stay as close as possible to the official Qwen template (minimal diff).
+
+    All enhancements are guarded by Feature Flags below (default = on).
+===================================================================== -#}
+
+{#- ------------------------- Feature Flags ------------------------- -#}
+{%- set FEAT_MERGE_SYSTEM        = true  -%}{#- merge every system message into one            -#}
+{%- set FEAT_DEVELOPER_TO_SYSTEM = true  -%}{#- fold `developer` role into system              -#}
+{%- set FEAT_SYSTEM_FIRST        = true  -%}{#- always emit the system block first             -#}
+{%- set FEAT_DROP_EMPTY          = true  -%}{#- skip empty / whitespace-only messages          -#}
+{%- set FEAT_KEEP_THINKING       = true  -%}{#- preserve assistant reasoning (<think>)         -#}
+{%- set FEAT_FLATTEN_MULTIMODAL  = true  -%}{#- flatten array/multimodal content to text       -#}
+{%- set FEAT_NORMALIZE_THINK     = true  -%}{#- normalize <thinking> tags to <think>           -#}
+{%- set FEAT_DEDUP               = false -%}{#- drop adjacent identical user/assistant messages -#}
+{%- set TOOL_RESULT_MAX          = 0     -%}{#- truncate tool results (chars); 0 = unlimited   -#}
+
+{#- Configurable Tools section (defaults match the official Qwen wording) -#}
+{%- set TOOL_HEADER = '# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>' -%}
+{%- set TOOL_FOOTER = '\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>' -%}
+
+{#- ----------------------------- Macros ----------------------------- -#}
+
+{#- Normalize any incoming role to one of: system | user | assistant | tool -#}
+{%- macro norm_role(r) -%}
+    {%- if r in ['system', 'developer'] -%}
+        {%- if r == 'developer' and not FEAT_DEVELOPER_TO_SYSTEM -%}user{%- else -%}system{%- endif -%}
+    {%- elif r in ['assistant', 'model', 'ai'] -%}assistant
+    {%- elif r in ['tool', 'tool_result', 'tool_response', 'function', 'function_result', 'function_call_output', 'observation'] -%}tool
+    {%- elif r in ['user', 'human'] -%}user
+    {%- else -%}user
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- Flatten content: string stays as-is; arrays/multimodal are reduced to text -#}
+{%- macro flatten(content) -%}
+    {%- if content is string -%}
+        {{- content -}}
+    {%- elif content and FEAT_FLATTEN_MULTIMODAL -%}
+        {%- for part in content -%}
+            {%- if part is string -%}
+                {{- part -}}
+            {%- elif 'text' in part and part.text is string -%}
+                {{- part.text -}}
+            {%- elif 'content' in part and part.content is string -%}
+                {{- part.content -}}
+            {%- elif 'type' in part and part.type in ['image', 'image_url', 'input_image'] -%}
+                {{- '<image>' -}}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- elif content -%}
+        {{- content -}}
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- Safe truncation helper for tool results -#}
+{%- macro clip(text) -%}
+    {%- if TOOL_RESULT_MAX and TOOL_RESULT_MAX > 0 and (text | length) > TOOL_RESULT_MAX -%}
+        {{- text[:TOOL_RESULT_MAX] + '\n...[truncated]' -}}
+    {%- else -%}
+        {{- text -}}
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- ------------------- 1. Collect / merge system ------------------- -#}
+{%- set sysns = namespace(text='', has=false) -%}
+{%- for message in messages -%}
+    {%- set role = norm_role(message.role) if 'role' in message else 'user' -%}
+    {%- if role == 'system' -%}
+        {%- set piece = flatten(message.content if 'content' in message else '') | trim -%}
+        {%- if piece -%}
+            {%- if sysns.has and FEAT_MERGE_SYSTEM -%}
+                {%- set sysns.text = sysns.text + '\n\n' + piece -%}
+            {%- elif not sysns.has -%}
+                {%- set sysns.text = piece -%}
+                {%- set sysns.has = true -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+
+{#- --------------------- 2. Emit system block ---------------------- -#}
+{%- if sysns.has or tools -%}
+    {{- '<|im_start|>system\n' -}}
+    {%- if sysns.has -%}
+        {{- sysns.text -}}
+    {%- endif -%}
+    {%- if tools -%}
+        {%- if sysns.has -%}{{- '\n\n' -}}{%- endif -%}
+        {{- TOOL_HEADER -}}
+        {%- for tool in tools -%}
+            {{- '\n' + (tool | tojson) -}}
+        {%- endfor -%}
+        {{- TOOL_FOOTER -}}
+    {%- endif -%}
+    {{- '<|im_end|>\n' -}}
+{%- endif -%}
+
+{#- --------------------- 3. Conversation loop ---------------------- -#}
+{%- set convns = namespace(prev_tool=false, last_sig='') -%}
+{%- for message in messages -%}
+    {%- set role = norm_role(message.role) if 'role' in message else 'user' -%}
+
+    {#- Close an open tool-response user turn when the next message is not a tool -#}
+    {%- if convns.prev_tool and role != 'tool' -%}
+        {{- '<|im_end|>\n' -}}
+        {%- set convns.prev_tool = false -%}
+    {%- endif -%}
+
+    {#- Adjacent duplicate suppression (opt-in via FEAT_DEDUP) -#}
+    {%- set is_dup = false -%}
+    {%- if FEAT_DEDUP and role in ['user', 'assistant'] -%}
+        {%- set cursig = role + '|' + (flatten(message.content if 'content' in message else '') | trim) -%}
+        {%- if 'tool_calls' in message and message.tool_calls -%}
+            {%- set cursig = cursig + '|' + (message.tool_calls | tojson) -%}
+        {%- endif -%}
+        {%- if cursig == convns.last_sig -%}
+            {%- set is_dup = true -%}
+        {%- else -%}
+            {%- set convns.last_sig = cursig -%}
+        {%- endif -%}
+    {%- endif -%}
+
+    {%- if role == 'system' -%}
+        {#- already emitted above -#}
+
+    {%- elif role == 'user' -%}
+        {%- set body = flatten(message.content if 'content' in message else '') | trim -%}
+        {%- if (body or not FEAT_DROP_EMPTY) and not is_dup -%}
+            {{- '<|im_start|>user\n' + body + '<|im_end|>\n' -}}
+        {%- endif -%}
+
+    {%- elif role == 'assistant' -%}
+        {%- set body = flatten(message.content if 'content' in message else '') -%}
+        {%- if FEAT_NORMALIZE_THINK -%}
+            {%- set body = body | replace('<thinking>', '<think>') | replace('</thinking>', '</think>') -%}
+        {%- endif -%}
+        {%- if not is_dup -%}
+            {{- '<|im_start|>assistant\n' -}}
+            {#- Reasoning: keep provided reasoning_content, unless body already has <think> -#}
+            {%- if FEAT_KEEP_THINKING and 'reasoning_content' in message and message.reasoning_content and '<think>' not in body -%}
+                {{- '<think>\n' + (message.reasoning_content | trim) + '\n</think>\n\n' -}}
+            {%- endif -%}
+            {{- body | trim -}}
+            {#- Tool calls (OpenAI / Qwen / Claude tool_use shapes) -#}
+            {%- if 'tool_calls' in message and message.tool_calls -%}
+                {%- for tc in message.tool_calls -%}
+                    {%- set fn = tc.function if 'function' in tc else tc -%}
+                    {%- set tname = fn.name if 'name' in fn else (tc.name if 'name' in tc else 'unknown') -%}
+                    {%- set targs = fn.arguments if 'arguments' in fn else (fn.input if 'input' in fn else (tc.input if 'input' in tc else {})) -%}
+                    {{- '\n<tool_call>\n{"name": "' + tname + '", "arguments": ' -}}
+                    {%- if targs is string -%}{{- targs -}}{%- else -%}{{- targs | tojson -}}{%- endif -%}
+                    {{- '}\n</tool_call>' -}}
+                {%- endfor -%}
+            {%- endif -%}
+            {{- '<|im_end|>\n' -}}
+        {%- endif -%}
+
+    {%- elif role == 'tool' -%}
+        {%- set convns.last_sig = '' -%}
+        {%- if not convns.prev_tool -%}
+            {{- '<|im_start|>user' -}}
+            {%- set convns.prev_tool = true -%}
+        {%- endif -%}
+        {%- set body = clip(flatten(message.content if 'content' in message else '') | trim) -%}
+        {{- '\n<tool_response>\n' + body + '\n</tool_response>' -}}
+    {%- endif -%}
+{%- endfor -%}
+
+{#- Close a trailing tool-response turn -#}
+{%- if convns.prev_tool -%}
+    {{- '<|im_end|>\n' -}}
+{%- endif -%}
+
+{#- --------------------- 4. Generation prompt ---------------------- -#}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\n' -}}
+    {%- if enable_thinking is defined and not enable_thinking -%}
+        {{- '<think>\n\n</think>\n\n' -}}
+    {%- endif -%}
+{%- endif -%}
