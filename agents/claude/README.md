@@ -185,3 +185,37 @@ Claude Code 的状态栏是一个**自定义命令**：Claude 会把一段 JSON 
 - **返回空 / None**：确认 llama-server 启动时带了
   `--chat-template-file templates/chat_template.jinja`。
 - **:9998 连接被拒**：代理没在运行 —— 执行 `start-proxy.ps1`。
+
+## 安装 plugin（可选）
+
+### codegraph（pnpm）
+
+```bash
+pnpm add -g @colbymchenry/codegraph
+```
+
+> 全局安装后即可使用（`codegraph --help` 查看用法）。pnpm / Node 安装见上面「方式 B」。
+
+### 常用 plugin（启动 claude 后逐条添加）
+
+`claude-plugins-official` 是官方内置 marketplace，启动即可用。进入 `claude` 会话后逐条执行
+（注意安装子命令是 `install`；`add` 是给 marketplace 用的）：
+
+```text
+/plugin install playwright@claude-plugins-official
+/plugin install code-review@claude-plugins-official
+/plugin install context7@claude-plugins-official
+/plugin install feature-dev@claude-plugins-official
+/plugin install frontend-design@claude-plugins-official
+/plugin install remember@claude-plugins-official
+/plugin install skill-creator@claude-plugins-official
+/plugin install superpowers@claude-plugins-official
+
+/plugin marketplace add Egonex-AI/Understand-Anything
+/plugin install understand-anything@understand-anything
+```
+
+装完 `/plugin list` 确认，再 `/reload-plugins` 使其生效。若提示找不到该 marketplace：
+`/plugin marketplace update claude-plugins-official`（首次则 `/plugin marketplace add anthropics/claude-plugins-official`）。
+
+> 想在 claude 外一键批量，用 CLI 版：`claude plugin install <name>@<marketplace>`（一次一个，可自行写循环）。

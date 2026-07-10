@@ -165,3 +165,14 @@ status_line = ["model-with-reasoning", "context-remaining", "current-dir", "git-
   走代理（`:9998`），它会剥离撞爆 llama.cpp 语法生成的约束关键字。
 - **401 / 鉴权错误**：llama.cpp 会忽略 API key，任意占位符即可。如果 Codex 坚持要 env key，
   把 `OPENAI_API_KEY` 设成任意值。
+
+
+## 安装 plugin（可选）
+
+### codegraph（pnpm）
+
+```bash
+pnpm add -g @colbymchenry/codegraph
+```
+
+> 全局安装后即可使用（`codegraph --help` 查看用法）。pnpm / Node 安装见上面「方式 B」。
