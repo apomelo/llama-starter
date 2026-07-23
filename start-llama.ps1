@@ -21,13 +21,45 @@ $ErrorActionPreference = "Stop"
 #  1. Centralized configuration  (edit here to extend behaviour)
 # ============================================================================
 $Config = [ordered]@{
+    # --- Server endpoint ---
     BindHost    = "127.0.0.1"
     Port        = 9999
-    NGpuLayers  = 999          # -ngl
-    CtxSize     = 131072       # -c   (default context = 128k)
+    Parallel    = 2            # --parallel  max concurrent requests (slots). The context (-c)
+                               #             is split across slots: per-request ctx = -c / Parallel.
+
+    # --- Model / context ---
+    NGpuLayers  = 999          # -ngl   offload all layers to GPU (999 = all). Keep high even
+                               #        with --n-cpu-moe: experts are pulled back to CPU
+                               #        separately, the rest of each layer stays on GPU.
+    CtxSize     = 256       # -c     default context = 128k (131072)
     Predict     = 8192         # -n
     UseJinja    = $true        # --jinja
-    KvCacheType = "q8_0"       # --cache-type-k/-v  (quantized KV cache; "" = disabled/f16)
+    BatchSize   = "1024"       # -b     logical batch (blank = llama default 2048); prefill only
+    UBatchSize  = "512"        # -ub    physical micro-batch (blank = default 512): larger = faster
+                               #        prompt processing but more VRAM; smaller saves VRAM at long ctx
+
+    # --- KV cache (K and V configured separately) ---
+    # Options: "" (f16) | q8_0 | iq4_nl | q4_0
+    #   q8_0 = best quality/size balance. iq4_nl/q4_0 = ~half the VRAM but some long-context
+    #   quality loss. Common long-ctx mix: K=q8_0  V=iq4_nl. V-cache quant needs flash-attn.
+    KCacheType  = "q8_0"     # --cache-type-k
+    VCacheType  = "iq4_nl"     # --cache-type-v
+
+    # --- MoE expert offload + memory ---
+    # NCpuMoe: "" = off (experts on GPU). N = keep experts of N layers on CPU (999 = all).
+    #   Lower N = more experts on GPU = faster, until VRAM fills. Overridable at launch.
+    NCpuMoe     = "999"        # --n-cpu-moe
+    # UseMlock: $true | $false | "auto"  (--mlock pins the whole model in RAM).
+    #   "auto" = on only when NCpuMoe is set (pin RAM-resident experts so they never page
+    #   out). $false keeps the PC freer for other apps; $true always pins.
+    UseMlock    = "auto"       # --mlock
+
+    # --- CPU / process ---
+    ThreadDivisor = 3          # --threads = physical_cores / ThreadDivisor  (1 = all cores)
+    Priority      = "BelowNormal"   # Cpu process priority: Idle | BelowNormal | Normal | AboveNormal | High
+
+    # --- Misc ---
+    ChatTemplate = "chat_template.jinja"  # --chat-template-file (file name under templates\; "" = model default / omit)
     ShortAlias  = $true        # trim fine-tune descriptor tags from the alias family name
 }
 
@@ -166,6 +198,8 @@ $supportsFlashAttn = $helpText -match '--flash-attn'
 $flashAttnTakesValue = $helpText -match '--flash-attn\s+\['   # newer builds: --flash-attn [on|off|auto]
 $supportsSlots = $helpText -match '--slots'
 $supportsCacheType = $helpText -match '--cache-type-k'
+$supportsNCpuMoe = $helpText -match '--n-cpu-moe'
+$supportsMlock = $helpText -match '--mlock'
 
 # ============================================================================
 #  4. Model discovery
@@ -232,7 +266,7 @@ $mode = $Modes[$modeSel - 1]
 #  7. Context size (entered in k; blank = default)
 # ============================================================================
 Write-Host ""
-$ctxDefaultK = [int]($Config.CtxSize / 1024)
+$ctxDefaultK = [int]($Config.CtxSize)
 $rawCtx = Read-Host "  Context size in k (blank = $ctxDefaultK)"
 if ([string]::IsNullOrWhiteSpace($rawCtx)) {
     $ctxK = $ctxDefaultK
@@ -250,20 +284,48 @@ else {
 $ctxSize = $ctxK * 1024
 
 # ============================================================================
-#  8. Chat template selection (optional; blank = model's built-in template)
+#  7b. MoE expert offload (--n-cpu-moe; blank = config default)
+# ============================================================================
+$nCpuMoe = $Config.NCpuMoe
+if ($supportsNCpuMoe) {
+    $moeDefLabel = if ([string]::IsNullOrWhiteSpace($nCpuMoe)) { "off" } else { $nCpuMoe }
+    Write-Host ""
+    $rawMoe = Read-Host "  --n-cpu-moe: expert-on-CPU layer count (blank = $moeDefLabel, 999 = all)"
+    if (-not [string]::IsNullOrWhiteSpace($rawMoe)) {
+        $moeN = 0
+        if ([int]::TryParse($rawMoe.Trim(), [ref]$moeN) -and $moeN -ge 0) { $nCpuMoe = "$moeN" }
+        else { Write-Host "  Invalid value, keeping $moeDefLabel." -ForegroundColor Yellow }
+    }
+}
+
+# ============================================================================
+#  8. Chat template selection (optional; blank = config default)
 # ============================================================================
 $chatTemplate = $null
 $templateDir = Join-Path $root "templates"
 $templates = @(Get-ChildItem "$templateDir\*.jinja" -ErrorAction SilentlyContinue)
+
+# Resolve the configured default template (by file name) if set.
+if (-not [string]::IsNullOrWhiteSpace($Config.ChatTemplate)) {
+    $cfgTpl = $templates | Where-Object { $_.Name -eq $Config.ChatTemplate } | Select-Object -First 1
+    if (-not $cfgTpl) {
+        $cfgPath = Join-Path $templateDir $Config.ChatTemplate
+        if (Test-Path $cfgPath) { $cfgTpl = Get-Item $cfgPath }
+    }
+    if ($cfgTpl) { $chatTemplate = $cfgTpl }
+    else { Write-Host "  [warn] configured chat template '$($Config.ChatTemplate)' not found; using model default." -ForegroundColor Yellow }
+}
+
 if ($templates.Count -gt 0) {
+    $tplDefLabel = if ($chatTemplate) { $chatTemplate.Name } else { "none" }
     Write-Host ""
-    Write-Host "  Chat templates (blank = model default):" -ForegroundColor Green
+    Write-Host "  Chat templates (blank = $tplDefLabel):" -ForegroundColor Green
     for ($i = 0; $i -lt $templates.Count; $i++) {
         Write-Host ("  {0}. " -f ($i + 1)) -ForegroundColor Yellow -NoNewline
         Write-Host $templates[$i].Name -ForegroundColor White
     }
     while ($true) {
-        $rawTpl = Read-Host "  Select chat template (blank = none)"
+        $rawTpl = Read-Host "  Select chat template (blank = $tplDefLabel)"
         if ([string]::IsNullOrWhiteSpace($rawTpl)) { break }
         $tplN = 0
         if ([int]::TryParse($rawTpl.Trim(), [ref]$tplN) -and $tplN -ge 1 -and $tplN -le $templates.Count) {
@@ -302,20 +364,56 @@ if ($supportsFlashAttn) {
 }
 if ($supportsSlots) { $serverArgs += "--slots" }
 
-# Quantized KV cache (q8_0). V-cache quantization needs flash attention.
+# Concurrency limit: number of parallel request slots. Context is split across slots.
+if ($Config.Parallel) { $serverArgs += @("--parallel", "$($Config.Parallel)") }
+
+# Quantized KV cache (K and V configured separately). V-cache quant needs flash-attn.
 $kvCacheActive = $false
-if ($supportsCacheType -and $Config.KvCacheType) {
-    $serverArgs += @("--cache-type-k", $Config.KvCacheType, "--cache-type-v", $Config.KvCacheType)
+$kvLabel = "f16 (disabled)"
+if ($supportsCacheType -and ($Config.KCacheType -or $Config.VCacheType)) {
+    if ($Config.KCacheType) { $serverArgs += @("--cache-type-k", $Config.KCacheType) }
+    if ($Config.VCacheType) { $serverArgs += @("--cache-type-v", $Config.VCacheType) }
     $kvCacheActive = $true
+    $kLbl = if ($Config.KCacheType) { $Config.KCacheType } else { "f16" }
+    $vLbl = if ($Config.VCacheType) { $Config.VCacheType } else { "f16" }
+    $kvLabel = "K=$kLbl  V=$vLbl"
 }
 
-# CPU threads = 1/4 of physical cores (min 1). Physical cores are preferred for
-# LLM inference; hyper-threaded logical cores rarely help and can hurt.
+# MoE expert offload: keep most experts in CPU/RAM, core compute on GPU.
+$moeSet = (-not [string]::IsNullOrWhiteSpace($nCpuMoe))
+# Experts are actually offloaded only when NCpuMoe is set AND greater than 0.
+$moeActive = $false
+if ($moeSet) {
+    $moeVal = 0
+    if ([int]::TryParse($nCpuMoe.Trim(), [ref]$moeVal)) { $moeActive = ($moeVal -gt 0) }
+    else { $moeActive = $true }
+}
+if ($supportsNCpuMoe -and $moeSet) {
+    $serverArgs += @("--n-cpu-moe", "$nCpuMoe")
+}
+
+# Effective mlock. "auto" = on only when experts are actually offloaded to CPU
+# (NCpuMoe set and > 0); otherwise honor the explicit boolean.
+if ($Config.UseMlock -is [string] -and $Config.UseMlock -match '^(?i)auto$') {
+    $useMlock = $moeActive
+} else {
+    $useMlock = [bool]$Config.UseMlock
+}
+if ($useMlock -and $supportsMlock) { $serverArgs += "--mlock" }
+
+# Batch / micro-batch (prefill throughput vs VRAM). Blank = llama.cpp defaults.
+if ($Config.BatchSize)  { $serverArgs += @("-b",  "$($Config.BatchSize)") }
+if ($Config.UBatchSize) { $serverArgs += @("-ub", "$($Config.UBatchSize)") }
+
+# CPU threads = physical_cores / ThreadDivisor (min 1). Physical cores are preferred
+# for LLM inference; hyper-threaded logical cores rarely help and can hurt. A larger
+# divisor leaves more cores free so the PC stays responsive for other work.
 $physicalCores = 0
 try { $physicalCores = [int](Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum } catch { }
 if ($physicalCores -lt 1) { $physicalCores = [int][math]::Floor([Environment]::ProcessorCount / 2) }  # fallback
 if ($physicalCores -lt 1) { $physicalCores = [Environment]::ProcessorCount }
-$threadCount = [math]::Max(1, [int][math]::Floor($physicalCores / 4))
+$divisor = [math]::Max(1, [int]$Config.ThreadDivisor)
+$threadCount = [math]::Max(1, [int][math]::Floor($physicalCores / $divisor))
 $serverArgs += @("--threads", "$threadCount", "--threads-batch", "$threadCount")
 
 foreach ($k in $mode.Params.Keys) {
@@ -335,17 +433,32 @@ Write-KV "Alias"       $alias
 Write-KV "mmproj"      $(if ($mmproj) { $mmproj.Name } else { "(none)" })
 Write-KV "Chat tmpl"   $(if ($chatTemplate) { $chatTemplate.Name } else { "(model default)" })
 Write-KV "Endpoint"    "http://$($Config.BindHost):$($Config.Port)"
+Write-KV "Parallel"    "$($Config.Parallel) slot(s)"
 Write-KV "Context"     "$ctxSize  (${ctxK}k)"
 Write-KV "GPU layers"  $Config.NGpuLayers
 Write-KV "flash-attn"  $(if ($supportsFlashAttn) { "enabled" } else { "unsupported" })
 Write-KV "slots"       $(if ($supportsSlots) { "enabled" } else { "unsupported" })
-Write-KV "KV cache"    $(if ($kvCacheActive) { $Config.KvCacheType } elseif ($supportsCacheType) { "f16 (disabled)" } else { "unsupported" })
-Write-KV "Threads"     "$threadCount / $physicalCores physical"
+Write-KV "KV cache"    $(if ($supportsCacheType) { $kvLabel } else { "unsupported" })
+Write-KV "n-cpu-moe"   $(if ($supportsNCpuMoe) { if ([string]::IsNullOrWhiteSpace($nCpuMoe)) { "off (experts on GPU)" } else { "$nCpuMoe experts -> CPU" } } else { "unsupported" })
+Write-KV "mlock"       $(if ($useMlock -and $supportsMlock) { "on" } else { "off" })
+Write-KV "Threads"     "$threadCount / $physicalCores physical  (/$divisor)"
+Write-KV "Priority"    $Config.Priority
+Write-KV "Batch"       "b=$(if ($Config.BatchSize) { $Config.BatchSize } else { 'default' })  ub=$(if ($Config.UBatchSize) { $Config.UBatchSize } else { 'default' })"
 if ($mode.Params.Count -gt 0) {
     $sampler = ($mode.Params.Keys | ForEach-Object { "$_ $($mode.Params[$_])" }) -join "  "
     Write-KV "Sampler" $sampler
 }
+# GPU VRAM baseline (compare with the server's post-load log to tune --n-cpu-moe).
+try {
+    $smi = (& nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+    if ($smi) { Write-KV "GPU VRAM" "$($smi.Trim()) (used/total MiB, before launch)" }
+} catch { }
 Write-Host ""
+
+# Lower our own priority so the child llama-server inherits it (keeps the PC responsive).
+try {
+    (Get-Process -Id $PID).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::$($Config.Priority)
+} catch { Write-Host "  [warn] could not set priority '$($Config.Priority)'." -ForegroundColor Yellow }
 
 Write-Host "  Starting llama-server..." -ForegroundColor Green
 Write-Host ""
